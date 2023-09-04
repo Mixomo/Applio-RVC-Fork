@@ -183,7 +183,6 @@ class VC:
         global total_time
         total_time = 0
         start_time = time.time()
-        rmvpe_onnx = True if f0_method == "rmvpe_onnx" else False
         if not input_audio_path0 and not input_audio_path1:
             return "You need to upload an audio", None
         
@@ -260,7 +259,6 @@ class VC:
                     protect,
                     crepe_hop_length,
                     f0_autotune,
-                    rmvpe_onnx,
                     f0_file=f0_file,
                     f0_min=f0_min,
                     f0_max=f0_max

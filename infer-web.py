@@ -1612,7 +1612,6 @@ def vc_single_tts(
     protect,
     crepe_hop_length,
     f0_autotune,
-    rmvpe_onnx
 ):  
     global tgt_sr, net_g, vc, hubert_model, version, cpt
     if input_audio_path is None:
@@ -1663,7 +1662,6 @@ def vc_single_tts(
             protect,
             crepe_hop_length,
             f0_autotune,
-            rmvpe_onnx,
             f0_file=f0_file,
         )
         if tgt_sr != resample_sr >= 16000:
@@ -1696,7 +1694,6 @@ def custom_voice(
         index_rate_=float(0.66),
         crepe_hop_length_=float(64),
         f0_autotune=False,
-        rmvpe_onnx=False,
         file_index='',
         file_index2='',
         ):
@@ -1733,7 +1730,6 @@ def custom_voice(
                 protect= float(0.33),
                 crepe_hop_length= crepe_hop_length_,
                 f0_autotune=f0_autotune,
-                rmvpe_onnx=rmvpe_onnx,
             )
 
             sf.write(
@@ -1793,7 +1789,6 @@ def make_test(
             return
         
         filename = os.path.join(now_dir, "audio-outputs", "converted_tts.wav")
-        rmvpe_onnx = True if f0_method == "rmvpe_onnx" else False
         if "SET_LIMIT" == os.getenv("DEMO"):
           if len(tts_text) > 60:
             tts_text = tts_text[:60]
@@ -1826,7 +1821,6 @@ def make_test(
                 index_rate_=index_rate,
                 crepe_hop_length_=crepe_hop_length,
                 f0_autotune=f0_autotune,
-                rmvpe_onnx=rmvpe_onnx,
                 file_index='',
                 file_index2=index_path,
             )
@@ -1869,7 +1863,6 @@ def make_test(
                     protect= float(0.33),
                     crepe_hop_length= crepe_hop_length,
                     f0_autotune=f0_autotune,
-                    rmvpe_onnx=rmvpe_onnx,
                 )
                 wavfile.write(os.path.join(now_dir, "audio-outputs", "converted_bark.wav"), rate=sample_, data=audio_output_)
                 return os.path.join(now_dir, "audio-outputs", "converted_bark.wav"), nombre_archivo
@@ -1976,7 +1969,7 @@ def GradioSetup(UTheme=gr.themes.Soft()):
                                     label=i18n(
                                         "Select the pitch extraction algorithm:"
                                     ),
-                                    choices=["pm", "harvest", "dio", "crepe", "crepe-tiny", "mangio-crepe", "mangio-crepe-tiny", "rmvpe", "rmvpe_onnx", "rmvpe+"], 
+                                    choices=["pm", "harvest", "dio", "crepe", "crepe-tiny", "mangio-crepe", "mangio-crepe-tiny", "rmvpe", "rmvpe+"], 
                                     value="rmvpe+",
                                     interactive=True,
                                 )
