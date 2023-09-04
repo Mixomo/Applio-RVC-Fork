@@ -567,7 +567,7 @@ class MelSpectrogram(torch.nn.Module):
 
 
 class RMVPE:
-    def __init__(self, model_path, is_half, onnx, device=None):
+    def __init__(self, model_path, is_half, device=None):
         self.resample_kernel = {}
         self.resample_kernel = {}
         self.is_half = is_half
