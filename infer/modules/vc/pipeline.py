@@ -92,7 +92,6 @@ class Pipeline(object):
             "harvest": self.get_harvest,
             "dio": self.get_dio,
             "rmvpe": self.get_rmvpe,
-            "rmvpe_onnx": self.get_rmvpe,
             "rmvpe+": self.get_pitch_dependant_rmvpe,
             "crepe": self.get_f0_official_crepe_computation,
             "crepe-tiny": partial(self.get_f0_official_crepe_computation, model='model'),
@@ -114,7 +113,6 @@ class Pipeline(object):
             2093.00, 2217.46, 2349.32, 2489.02, 2637.02, 2793.83,
             2959.96, 3135.96, 3322.44, 3520.00, 3729.31, 3951.07
         ]
-        self.onnx = False
 
     # Fork Feature: Get the best torch device to use for f0 algorithms that require a torch device. Will return the type (torch.device)
     def get_optimal_torch_device(self, index: int = 0) -> torch.device:
@@ -245,23 +243,20 @@ class Pipeline(object):
 
 
     def get_rmvpe(self, x, *args, **kwargs):
-        if self.onnx == False: 
-            return self.model_rmvpe.infer_from_audio(x, thred=0.03)
-        else:
+        if not hasattr(self, "model_rmvpe"):
+            from infer.lib.rmvpe import RMVPE
+            
             logger.info(
-                    "Loading rmvpe model,%s" % "%s/rmvpe.pt" % os.environ["rmvpe_root"]
-                )
+                "Loading rmvpe model,%s" % "%s/rmvpe.pt" % os.environ["rmvpe_root"]
+            )
             self.model_rmvpe = RMVPE(
-                    "%s/rmvpe.pt" % os.environ["rmvpe_root"],
-                    is_half=self.is_half,
-                    device=self.device,
-                )
-            f0 = self.model_rmvpe.infer_from_audio(x, thred=0.03)
-            if "privateuseone" in str(self.device):
-                    del self.model_rmvpe.model
-                    del self.model_rmvpe
-                    print("cleaning ortruntime memory")
-            return f0
+                "%s/rmvpe.pt" % os.environ["rmvpe_root"],
+                is_half=self.is_half,
+                device=self.device,
+            )
+        f0 = self.model_rmvpe.infer_from_audio(x, thred=0.03)
+            
+        return f0
     
 
     def get_pitch_dependant_rmvpe(self, x, f0_min=1, f0_max=40000, *args, **kwargs):
@@ -329,7 +324,6 @@ class Pipeline(object):
         filter_radius,
         crepe_hop_length,
         f0_autotune,
-        rmvpe_onnx,
         inp_f0=None,
         f0_min=50,
         f0_max=1100,
@@ -342,7 +336,7 @@ class Pipeline(object):
         f0_mel_max = 1127 * np.log(1 + f0_max / 700)
         params = {'x': x, 'p_len': p_len, 'f0_up_key': f0_up_key, 'f0_min': f0_min, 
           'f0_max': f0_max, 'time_step': time_step, 'filter_radius': filter_radius, 
-          'crepe_hop_length': crepe_hop_length, 'model': "full", 'onnx': rmvpe_onnx
+          'crepe_hop_length': crepe_hop_length, 'model': "full"
         }
 
         if "hybrid" in f0_method:
@@ -361,7 +355,12 @@ class Pipeline(object):
             )
         else:
             f0 = self.f0_method_dict[f0_method](**params)
-        
+
+        if "privateuseone" in str(self.device):  # clean ortruntime memory
+            del self.model_rmvpe.model
+            del self.model_rmvpe
+            logger.info("Cleaning ortruntime memory")
+
         if f0_autotune:
             f0 = self.autotune_f0(f0)
 
@@ -539,7 +538,6 @@ class Pipeline(object):
         protect,
         crepe_hop_length, 
         f0_autotune, 
-        rmvpe_onnx, 
         f0_file=None, 
         f0_min=50, 
         f0_max=1100
@@ -604,8 +602,7 @@ class Pipeline(object):
                 f0_method,
                 filter_radius, 
                 crepe_hop_length, 
-                f0_autotune, 
-                rmvpe_onnx, 
+                f0_autotune,
                 inp_f0, 
                 f0_min, 
                 f0_max

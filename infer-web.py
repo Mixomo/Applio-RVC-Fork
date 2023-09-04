@@ -2419,9 +2419,8 @@ def GradioSetup(UTheme=gr.themes.Soft()):
                                     interactive=True,
                                 )
                                 gpu_info9 = gr.Textbox(
-                                    label=i18n("显卡信息"), value=gpu_info, visible=F0GPUVisible
+                                    label=i18n("GPU Information:"), value=gpu_info, visible=F0GPUVisible
                                 )
-                                gr.Textbox(label=i18n("GPU Information:"), value=gpu_info)
                             with gr.Column():
                                 f0method8 = gr.Radio(
                                     label=i18n(

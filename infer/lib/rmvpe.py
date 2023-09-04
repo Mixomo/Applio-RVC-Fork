@@ -571,7 +571,6 @@ class RMVPE:
         self.resample_kernel = {}
         self.resample_kernel = {}
         self.is_half = is_half
-        self.onnx = onnx
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
