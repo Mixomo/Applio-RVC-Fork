@@ -43,14 +43,15 @@ from i18n import I18nAuto
 i18n = I18nAuto()
 from bs4 import BeautifulSoup
 from sklearn.cluster import MiniBatchKMeans
+from dotenv import load_dotenv
 
 config = Config()
 tmp = os.path.join(now_dir, "TEMP")
 shutil.rmtree(tmp, ignore_errors=True)
 os.environ["TEMP"] = tmp
-weight_root = "weights"
-weight_uvr5_root = "uvr5_weights"
-index_root = "./logs/"
+weight_root = os.getenv("weight_root")
+weight_uvr5_root = os.getenv("weight_uvr5_root")
+index_root = os.getenv("index_root")
 audio_root = "audios"
 names = []
 for name in os.listdir(weight_root):
