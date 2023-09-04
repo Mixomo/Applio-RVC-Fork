@@ -44,7 +44,7 @@ i18n = I18nAuto()
 from bs4 import BeautifulSoup
 from sklearn.cluster import MiniBatchKMeans
 from dotenv import load_dotenv
-
+load_dotenv()
 config = Config()
 tmp = os.path.join(now_dir, "TEMP")
 shutil.rmtree(tmp, ignore_errors=True)

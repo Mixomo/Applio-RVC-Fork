@@ -1,9 +1,18 @@
 import os
-
+import re
 from fairseq import checkpoint_utils
 
 
 def get_index_path_from_model(sid):
+    sid0strip = re.sub(r'\.pth|\.onnx$', '', sid)
+    sid0name = os.path.split(sid0strip)[-1]  # Extract only the name, not the directory
+
+    # Check if the sid0strip has the specific ending format _eXXX_sXXX
+    if re.match(r'.+_e\d+_s\d+$', sid0name):
+        base_model_name = sid0name.rsplit('_', 2)[0]
+    else:
+        base_model_name = sid0name
+    
     return next(
         (
             f
@@ -13,7 +22,7 @@ def get_index_path_from_model(sid):
                 for name in files
                 if name.endswith(".index") and "trained" not in name
             ]
-            if sid.split(".")[0] in f
+            if base_model_name in f
         ),
         "",
     )
