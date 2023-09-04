@@ -9,8 +9,8 @@ import numpy as np
 import soundfile as sf
 import torch
 from io import BytesIO
-
-from infer.lib.audio import load_audio, wav2
+from my_utils import load_audio
+from infer.lib.audio import wav2
 from infer.lib.infer_pack.models import (
     SynthesizerTrnMs256NSFsid,
     SynthesizerTrnMs256NSFsid_nono,
@@ -205,8 +205,8 @@ class VC:
         try:
             input_audio_path1 = input_audio_path1 or input_audio_path0
             print(f"Attempting to load {input_audio_path1}....")
-            audio = load_audio(input_audio_path1,
-                               16000,
+            audio = load_audio(file=input_audio_path1,
+                               sr=16000,
                                DoFormant=rvc_globals.DoFormant,
                                Quefrency=rvc_globals.Quefrency,
                                Timbre=rvc_globals.Timbre)
