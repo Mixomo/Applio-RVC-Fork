@@ -6,7 +6,8 @@ import librosa
 import numpy as np
 import logging
 from fairseq import checkpoint_utils
-from vc_infer_pipeline import VC
+from infer.modules.vc.pipeline import Pipeline
+VC = Pipeline
 import traceback
 from config import Config
 from lib.infer_pack.models import (

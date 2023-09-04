@@ -1,15 +1,13 @@
-import sys
-from shutil import rmtree
-import shutil
-import json # Mangio fork using json for preset saving
-import datetime
-import unicodedata
-from glob import glob1
-from signal import SIGTERM
-import librosa
-import os
+import os, sys
+
 now_dir = os.getcwd()
 sys.path.append(now_dir)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["no_proxy"] = "localhost, 127.0.0.1, ::1"
+import logging
+import shutil
+import threading
 import lib.globals.globals as rvc_globals
 from LazyImport import lazyload
 import mdx
@@ -18,29 +16,54 @@ math = lazyload('math')
 import traceback
 import warnings
 tensorlowest = lazyload('tensorlowest')
+from random import shuffle
+from subprocess import Popen
+from time import sleep
+import json
+import pathlib
+
+import fairseq
+logging.getLogger("faiss").setLevel(logging.WARNING)
 import faiss
+gr = lazyload("gradio")
+np = lazyload("numpy")
+torch = lazyload('torch')
+re = lazyload('regex')
+SF = lazyload("soundfile")
+SFWrite = SF.write
+from dotenv import load_dotenv
+from sklearn.cluster import MiniBatchKMeans
+import datetime
+
+
+from glob import glob1
+from signal import SIGTERM
+import librosa
+
+from configs.config import Config
+from i18n import I18nAuto
+from infer.lib.train.process_ckpt import (
+    change_info,
+    extract_small_model,
+    merge,
+    show_info,
+)
+#from infer.modules.uvr5.modules import uvr
+from infer.modules.vc.modules import VC
+from infer.modules.vc.utils import *
+from infer.modules.vc.pipeline import Pipeline
+import lib.globals.globals as rvc_globals
+math = lazyload('math')
 ffmpeg = lazyload('ffmpeg')
 import nltk
 nltk.download('punkt', quiet=True)
 from nltk.tokenize import sent_tokenize
-from bark import generate_audio, SAMPLE_RATE
-np = lazyload("numpy")
-torch = lazyload('torch')
-re = lazyload('regex')
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["no_proxy"] = "localhost, 127.0.0.1, ::1"
-import logging
-from random import shuffle
-from subprocess import Popen
+from bark import SAMPLE_RATE
+
 import easy_infer
 import audioEffects
-gr = lazyload("gradio")
-SF = lazyload("soundfile")
-SFWrite = SF.write
-from config import Config
-import fairseq
-from i18n import I18nAuto
+
+
 from lib.infer_pack.models import (
     SynthesizerTrnMs256NSFsid,
     SynthesizerTrnMs256NSFsid_nono,
@@ -51,40 +74,46 @@ from lib.infer_pack.models_onnx import SynthesizerTrnMsNSFsidM
 from infer_uvr5 import _audio_pre_, _audio_pre_new
 from MDXNet import MDXNetDereverb
 from my_utils import load_audio
-from train.process_ckpt import change_info, extract_small_model, merge, show_info
-from vc_infer_pipeline import VC
+
+
 from sklearn.cluster import MiniBatchKMeans
 
 import time
-import threading
 
 from shlex import quote as SQuote
-#Tabs
 
 
-nonen = ""
+
+
 RQuote = lambda val: SQuote(str(val))
 
 tmp = os.path.join(now_dir, "TEMP")
 runtime_dir = os.path.join(now_dir, "runtime/Lib/site-packages")
 directories = ['logs', 'audios', 'datasets', 'weights']
 
-rmtree(tmp, ignore_errors=True)
-rmtree(os.path.join(runtime_dir, "infer_pack"), ignore_errors=True)
-rmtree(os.path.join(runtime_dir, "uvr5_pack"), ignore_errors=True)
+shutil.rmtree(tmp, ignore_errors=True)
+shutil.rmtree("%s/runtime/Lib/site-packages/infer_pack" % (now_dir), ignore_errors=True)
+shutil.rmtree("%s/runtime/Lib/site-packages/uvr5_pack" % (now_dir), ignore_errors=True)
 
 os.makedirs(tmp, exist_ok=True)
 for folder in directories:
     os.makedirs(os.path.join(now_dir, folder), exist_ok=True)
 
+
+os.makedirs(tmp, exist_ok=True)
+os.makedirs(os.path.join(now_dir, "logs"), exist_ok=True)
+os.makedirs(os.path.join(now_dir, "assets/weights"), exist_ok=True)
 os.environ["TEMP"] = tmp
 warnings.filterwarnings("ignore")
 torch.manual_seed(114514)
 logging.getLogger("numba").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 try:
     file = open('csvdb/stop.csv', 'x')
     file.close()
 except FileExistsError: pass
+
 
 global DoFormant, Quefrency, Timbre
 
@@ -92,51 +121,89 @@ DoFormant = rvc_globals.DoFormant
 Quefrency = rvc_globals.Quefrency
 Timbre = rvc_globals.Timbre
 
+load_dotenv()
 config = Config()
-if(config.dml==True):
+vc = VC(config)
+
+if config.dml == True:
+
     def forward_dml(ctx, x, scale):
         ctx.scale = scale
         res = x.clone().detach()
         return res
-    fairseq.modules.grad_multiply.GradMultiply.forward=forward_dml
+
+    fairseq.modules.grad_multiply.GradMultiply.forward = forward_dml
+
 i18n = I18nAuto()
 i18n.print()
+# 判断是否有能用来训练和加速推理的N卡
 ngpu = torch.cuda.device_count()
 gpu_infos = []
 mem = []
 if_gpu_ok = False
 
-keywords = ["10", "16", "20", "30", "40", "A2", "A3", "A4", "P4", "A50", "500", "A60", 
-            "70", "80", "90", "M4", "T4", "TITAN"]
 
 if torch.cuda.is_available() or ngpu != 0:
     for i in range(ngpu):
-        gpu_name = torch.cuda.get_device_name(i).upper()
-        if any(keyword in gpu_name for keyword in keywords):
-            if_gpu_ok = True  
+        gpu_name = torch.cuda.get_device_name(i)
+        if any(
+            value in gpu_name.upper()
+            for value in [
+                "10",
+                "16",
+                "20",
+                "30",
+                "40",
+                "A2",
+                "A3",
+                "A4",
+                "P4",
+                "A50",
+                "500",
+                "A60",
+                "70",
+                "80",
+                "90",
+                "M4",
+                "T4",
+                "TITAN",
+            ]
+        ):
+            # A10#A100#V100#A40#P40#M40#K80#A4500
+            if_gpu_ok = True  # 至少有一张能用的N卡
             gpu_infos.append("%s\t%s" % (i, gpu_name))
-            mem.append(int(torch.cuda.get_device_properties(i).total_memory / 1e9 + 0.4))
+            mem.append(
+                int(
+                    torch.cuda.get_device_properties(i).total_memory
+                    / 1024
+                    / 1024
+                    / 1024
+                    + 0.4
+                )
+            )
+if if_gpu_ok and len(gpu_infos) > 0:
+    gpu_info = "\n".join(gpu_infos)
+    default_batch_size = min(mem) // 2
+else:
+    gpu_info = i18n("很遗憾您这没有能用的显卡来支持您训练")
+    default_batch_size = 1
+gpus = "-".join([i[0] for i in gpu_infos])
 
-gpu_info = "\n".join(gpu_infos) if if_gpu_ok and gpu_infos else "Unfortunately, there is no compatible GPU available to support your training."
-default_batch_size = min(mem) // 2 if if_gpu_ok and gpu_infos else 1
-gpus = "-".join(i[0] for i in gpu_infos)
+class ToolButton(gr.Button, gr.components.FormComponent):
+    """Small button with single emoji as text, fits inside gradio forms"""
+
+    def __init__(self, **kwargs):
+        super().__init__(variant="tool", **kwargs)
+
+    def get_block_name(self):
+        return "button"
+
 
 hubert_model = None
-
-def load_hubert():
-    global hubert_model
-    models, _, _ = fairseq.checkpoint_utils.load_model_ensemble_and_task(["hubert_base.pt"], suffix="")
-    hubert_model = models[0].to(config.device)
-    
-    if config.is_half:
-        hubert_model = hubert_model.half()
-
-    hubert_model.eval()
-
+weight_root = os.getenv("weight_root")
+weight_uvr5_root = os.getenv("weight_uvr5_root")
+index_root = os.getenv("index_root")
 datasets_root = "datasets"
-weight_root = "weights"
-weight_uvr5_root = "uvr5_weights"
-index_root = "logs"
 fshift_root = "formantshiftcfg"
 audio_root = "audios"
 audio_others_root = "audio-others"
@@ -302,209 +369,6 @@ def audio_combined(audio1_path, audio2_path, volume_factor_audio1=1.0, volume_fa
         return i18n("Conversion complete!"), output_path
 
 
-def vc_single(
-    sid:               str,
-    input_audio_path0: str,
-    input_audio_path1: str,
-    f0_up_key:         int,
-    f0_file:           str,
-    f0_method:         str,
-    file_index:        str,
-    file_index2:       str,
-    index_rate:        float,
-    filter_radius:     int,
-    resample_sr:       int,
-    rms_mix_rate:      float,
-    protect:           float,
-    crepe_hop_length:  int,
-    f0_min:            int,
-    note_min:          str,
-    f0_max:            int,
-    note_max:          str,
-    f0_autotune:       bool,
-):
-    global total_time
-    total_time = 0
-    start_time = time.time()
-    global tgt_sr, net_g, vc, hubert_model, version
-    rmvpe_onnx = True if f0_method == "rmvpe_onnx" else False
-    if not input_audio_path0 and not input_audio_path1:
-        return "You need to upload an audio", None
-
-    if (not os.path.exists(input_audio_path0)) and (not os.path.exists(os.path.join(now_dir, input_audio_path0))):
-        return "Audio was not properly selected or doesn't exist", None
-    
-    input_audio_path1 = input_audio_path1 or input_audio_path0
-    print(f"\nStarting inference for '{os.path.basename(input_audio_path1)}'")
-    print("-------------------")
-
-    f0_up_key = int(f0_up_key)
-    
-    if rvc_globals.NotesOrHertz and f0_method != 'rmvpe':
-        f0_min = note_to_hz(note_min) if note_min else 50
-        f0_max = note_to_hz(note_max) if note_max else 1100
-        print(f"Converted Min pitch: freq - {f0_min}\n"
-              f"Converted Max pitch: freq - {f0_max}")
-    else:
-        f0_min = f0_min or 50
-        f0_max = f0_max or 1100
-    try:
-        input_audio_path1 = input_audio_path1 or input_audio_path0
-        print(f"Attempting to load {input_audio_path1}....")
-        audio = load_audio(input_audio_path1,
-                           16000,
-                           DoFormant=rvc_globals.DoFormant,
-                           Quefrency=rvc_globals.Quefrency,
-                           Timbre=rvc_globals.Timbre)
-        
-        audio_max = np.abs(audio).max() / 0.95
-        if audio_max > 1:
-            audio /= audio_max
-            
-        times = [0, 0, 0]
-        if not hubert_model:
-            print("Loading hubert for the first time...")
-            load_hubert()
-        
-        try:
-            if_f0 = cpt.get("f0", 1)
-        except NameError:
-            message = "Model was not properly selected"
-            print(message)
-            return message, None
-        
-        file_index = (
-            file_index.strip(" ").strip('"').strip("\n").strip('"').strip(" ").replace("trained", "added")
-        ) if file_index != "" else file_index2
-        
-        try:
-            audio_opt = vc.pipeline(
-                hubert_model,
-                net_g,
-                sid,
-                audio,
-                input_audio_path1,
-                times,
-                f0_up_key,
-                f0_method,
-                file_index,
-                index_rate,
-                if_f0,
-                filter_radius,
-                tgt_sr,
-                resample_sr,
-                rms_mix_rate,
-                version,
-                protect,
-                crepe_hop_length,
-                f0_autotune,
-                rmvpe_onnx,
-                f0_file=f0_file,
-                f0_min=f0_min,
-                f0_max=f0_max
-            )
-        except AssertionError:
-            message = "Mismatching index version detected (v1 with v2, or v2 with v1)."
-            print(message)
-            return message, None
-        except NameError:
-            message = "RVC libraries are still loading. Please try again in a few seconds."
-            print(message)
-            return message, None
-        
-        if tgt_sr != resample_sr >= 16000:
-            tgt_sr = resample_sr
-            
-        index_info = "Using index:%s." % file_index if os.path.exists(file_index) else "Index not used."
-
-        end_time = time.time()
-        total_time = end_time - start_time
-
-        output_folder = "audio-outputs"
-        os.makedirs(output_folder, exist_ok=True)  
-        output_filename = "generated_audio_{}.wav"
-        output_count = 1
-        while True:
-            current_output_path = os.path.join(output_folder, output_filename.format(output_count))
-            if not os.path.exists(current_output_path):
-                break
-            output_count += 1
-        
-        # Guardar el audio generado como archivo WAV
-        wavfile.write(current_output_path, tgt_sr, audio_opt)
-
-        print(f"Generated audio saved to: {current_output_path}")
-
-        return f"Success.\n {index_info}\nTime:\n npy:{times[0]}, f0:{times[1]}, infer:{times[2]}\nTotal Time: {total_time} seconds", (tgt_sr, audio_opt)
-    except:
-        info = traceback.format_exc()
-        print(info)
-        return info, (None, None)
-
-def vc_multi(
-    sid,
-    dir_path,
-    opt_root,
-    paths,
-    f0_up_key,
-    f0_method,
-    file_index,
-    file_index2,
-    index_rate,
-    filter_radius,
-    resample_sr,
-    rms_mix_rate,
-    protect,
-    format1,
-    crepe_hop_length,
-    f0_min,
-    note_min,
-    f0_max,
-    note_max,
-    f0_autotune,
-):
-    if rvc_globals.NotesOrHertz and f0_method != 'rmvpe':
-        f0_min = note_to_hz(note_min) if note_min else 50
-        f0_max = note_to_hz(note_max) if note_max else 1100
-        print(f"Converted Min pitch: freq - {f0_min}\n"
-              f"Converted Max pitch: freq - {f0_max}")
-    else:
-        f0_min = f0_min or 50
-        f0_max = f0_max or 1100
-
-    try:
-        dir_path, opt_root = [x.strip(" ").strip('"').strip("\n").strip('"').strip(" ") for x in [dir_path, opt_root]]
-        os.makedirs(opt_root, exist_ok=True)
-        
-        paths = [os.path.join(dir_path, name) for name in os.listdir(dir_path)] if dir_path else [path.name for path in paths]
-        infos = []
-
-        for path in paths:
-            info, opt = vc_single(sid, path, None, f0_up_key, None, f0_method, file_index, file_index2, index_rate, filter_radius,
-                                  resample_sr, rms_mix_rate, protect, crepe_hop_length, f0_min, note_min, f0_max, note_max,f0_autotune)
-
-            if "Success" in info:
-                try:
-                    tgt_sr, audio_opt = opt
-                    base_name = os.path.splitext(os.path.basename(path))[0]
-                    output_path = f"{opt_root}/{base_name}.{format1}"
-                    path, extension = output_path, format1
-                    path, extension = output_path if format1 in ["wav", "flac", "mp3", "ogg", "aac", "m4a"] else f"{output_path}.wav", format1
-                    SFWrite(path, audio_opt, tgt_sr)
-                    #sys.stdout.write("\nFile Written Successfully with SFWrite") # Debugging print
-                    if os.path.exists(path) and extension not in ["wav", "flac", "mp3", "ogg", "aac", "m4a"]:
-                        sys.stdout.write(f"Running command: ffmpeg -i {RQuote(path)} -vn {RQuote(path[:-4] + '.' + extension)} -q:a 2 -y")
-                        os.system(f"ffmpeg -i {RQuote(path)} -vn {RQuote(path[:-4] + '.' + extension)} -q:a 2 -y")
-                        #print(f"\nFile Converted to {extension} using ffmpeg") # Debugging print
-                except:
-                    info += traceback.format_exc()
-                    print(f"\nException encountered: {info}") # Debugging print
-            infos.append(f"{os.path.basename(path)}->{info}")
-            yield "\n".join(infos)
-        yield "\n".join(infos)
-    except:
-        yield traceback.format_exc()
-        
 
 
 def uvr(model_name, inp_root, save_root_vocal, paths, save_root_ins, agg, format0,architecture):
@@ -652,53 +516,6 @@ def uvr(model_name, inp_root, save_root_vocal, paths, save_root_ins, agg, format
 
 
 
-def get_vc(sid, to_return_protect0, to_return_protect1):
-    global n_spk, tgt_sr, net_g, vc, cpt, version, hubert_model
-    if not sid:
-        if hubert_model is not None:
-            print("clean_empty_cache")
-            del net_g, n_spk, vc, hubert_model, tgt_sr
-            hubert_model = net_g = n_spk = vc = hubert_model = tgt_sr = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            if_f0, version = cpt.get("f0", 1), cpt.get("version", "v1")
-            net_g = (SynthesizerTrnMs256NSFsid if version == "v1" else SynthesizerTrnMs768NSFsid)(
-                *cpt["config"], is_half=config.is_half) if if_f0 == 1 else (SynthesizerTrnMs256NSFsid_nono if version == "v1" else SynthesizerTrnMs768NSFsid_nono)(*cpt["config"])
-            del net_g, cpt
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            cpt = None
-        return ({"visible": False, "__type__": "update"},) * 3
-
-    print(f"loading {sid}")
-    cpt = torch.load(sid, map_location="cpu")
-    tgt_sr = cpt["config"][-1]
-    cpt["config"][-3] = cpt["weight"]["emb_g.weight"].shape[0]
-
-    if cpt.get("f0", 1) == 0:
-        to_return_protect0 = to_return_protect1 = {"visible": False, "value": 0.5, "__type__": "update"}
-    else:
-        to_return_protect0 = {"visible": True, "value": to_return_protect0, "__type__": "update"}
-        to_return_protect1 = {"visible": True, "value": to_return_protect1, "__type__": "update"}
-
-    version = cpt.get("version", "v1")
-    net_g = (SynthesizerTrnMs256NSFsid if version == "v1" else SynthesizerTrnMs768NSFsid)(
-        *cpt["config"], is_half=config.is_half) if cpt.get("f0", 1) == 1 else (SynthesizerTrnMs256NSFsid_nono if version == "v1" else SynthesizerTrnMs768NSFsid_nono)(*cpt["config"])
-    del net_g.enc_q
-
-    print(net_g.load_state_dict(cpt["weight"], strict=False))
-    net_g.eval().to(config.device)
-    net_g = net_g.half() if config.is_half else net_g.float()
-
-    vc = VC(tgt_sr, config)
-    n_spk = cpt["config"][-3]
-
-    return (
-        {"visible": False, "maximum": n_spk, "__type__": "update"},
-        to_return_protect0,
-        to_return_protect1
-    )
-
 
 def change_choices():
     names        = [os.path.join(root, file)
@@ -737,21 +554,41 @@ def change_choices3():
         {"choices": sorted(audio_paths), "__type__": "update"}
     )
 
+def clean():
+    return {"value": "", "__type__": "update"}
+def export_onnx():
+    from infer.modules.onnx.export import export_onnx as eo
+
+    eo()
+
 sr_dict = {
     "32k": 32000,
     "40k": 40000,
     "48k": 48000,
 }
 
-def if_done(done, p):
-    while p.poll() is None:
-        time.sleep(0.5)
 
+def if_done(done, p):
+    while 1:
+        if p.poll() is None:
+            sleep(0.5)
+        else:
+            break
     done[0] = True
 
+
 def if_done_multi(done, ps):
-    while not all(p.poll() is not None for p in ps):
-        time.sleep(0.5)
+    while 1:
+        # poll==None代表进程未结束
+        # 只要有一个进程未结束都不停
+        flag = 1
+        for p in ps:
+            if p.poll() is None:
+                flag = 0
+                sleep(0.5)
+                break
+        if flag == 1:
+            break
     done[0] = True
 
 def formant_enabled(cbox, qfrency, tmbre):
@@ -804,143 +641,239 @@ def update_fshift_presets(preset, qfrency, tmbre):
 
 def preprocess_dataset(trainset_dir, exp_dir, sr, n_p):
     sr = sr_dict[sr]
-    
-    log_dir = os.path.join(now_dir, "logs", exp_dir)
-    log_file = os.path.join(log_dir, "preprocess.log")
-    
-    os.makedirs(log_dir, exist_ok=True)
-
-    with open(log_file, "w") as f: pass
-
-    cmd = (
-        f"{config.python_cmd} "
-        "trainset_preprocess_pipeline_print.py "
-        f"{trainset_dir} "
-        f"{RQuote(sr)} "
-        f"{RQuote(n_p)} "
-        f"{log_dir} "
-        f"{RQuote(config.noparallel)}"
+    os.makedirs("%s/logs/%s" % (now_dir, exp_dir), exist_ok=True)
+    f = open("%s/logs/%s/preprocess.log" % (now_dir, exp_dir), "w")
+    f.close()
+    per = 3.0 if config.is_half else 3.7
+    cmd = '"%s" infer/modules/train/preprocess.py "%s" %s %s "%s/logs/%s" %s %.1f' % (
+        config.python_cmd,
+        trainset_dir,
+        sr,
+        n_p,
+        now_dir,
+        exp_dir,
+        config.noparallel,
+        per,
     )
-    print(cmd)
-
-    p = Popen(cmd, shell=True)
+    logger.info(cmd)
+    p = Popen(cmd, shell=True)  # , stdin=PIPE, stdout=PIPE,stderr=PIPE,cwd=now_dir
+    ###煞笔gr, popen read都非得全跑完了再一次性读取, 不用gr就正常读一句输出一句;只能额外弄出一个文本流定时读
     done = [False]
-
-    threading.Thread(target=if_done, args=(done,p,)).start()
-
-    while not done[0]:
-        with open(log_file, "r") as f:
-            yield f.read()
-        time.sleep(1)
-   
-    with open(log_file, "r") as f:
+    threading.Thread(
+        target=if_done,
+        args=(
+            done,
+            p,
+        ),
+    ).start()
+    while 1:
+        with open("%s/logs/%s/preprocess.log" % (now_dir, exp_dir), "r") as f:
+            yield (f.read())
+        sleep(1)
+        if done[0]:
+            break
+    with open("%s/logs/%s/preprocess.log" % (now_dir, exp_dir), "r") as f:
         log = f.read()
-    
-    print(log)
+    logger.info(log)
     yield log
 
-def extract_f0_feature(gpus, n_p, f0method, if_f0, exp_dir, version19, echl):
+
+def extract_f0_feature(gpus, n_p, f0method, if_f0, exp_dir, version19, echl, gpus_rmvpe):
     gpus = gpus.split("-")
-    log_dir = f"{now_dir}/logs/{exp_dir}"
-    log_file = f"{log_dir}/extract_f0_feature.log"
-    os.makedirs(log_dir, exist_ok=True)
-    with open(log_file, "w") as f: pass
-
+    os.makedirs("%s/logs/%s" % (now_dir, exp_dir), exist_ok=True)
+    f = open("%s/logs/%s/extract_f0_feature.log" % (now_dir, exp_dir), "w")
+    f.close()
     if if_f0:
-        cmd = (
-            f"{config.python_cmd} extract_f0_print.py {log_dir} " 
-            f"{RQuote(n_p)} {RQuote(f0method)} {RQuote(echl)}"
-        )
-        print(cmd)
-        p = Popen(cmd, shell=True, cwd=now_dir)
-        done = [False]
-        threading.Thread(target=if_done, args=(done, p)).start()
-
-        while not done[0]:
-            with open(log_file, "r") as f:
-                yield f.read()
-            time.sleep(1)
-
+        if f0method != "rmvpe_gpu":
+            cmd = (
+                '"%s" infer/modules/train/extract/extract_f0_print.py "%s/logs/%s" %s %s'
+                % (
+                    config.python_cmd,
+                    now_dir,
+                    exp_dir,
+                    n_p,
+                    f0method,
+                    echl,
+                )
+            )
+            logger.info(cmd)
+            p = Popen(
+                cmd, shell=True, cwd=now_dir
+            )  # , stdin=PIPE, stdout=PIPE,stderr=PIPE
+            ###煞笔gr, popen read都非得全跑完了再一次性读取, 不用gr就正常读一句输出一句;只能额外弄出一个文本流定时读
+            done = [False]
+            threading.Thread(
+                target=if_done,
+                args=(
+                    done,
+                    p,
+                ),
+            ).start()
+        else:
+            if gpus_rmvpe != "-":
+                gpus_rmvpe = gpus_rmvpe.split("-")
+                leng = len(gpus_rmvpe)
+                ps = []
+                for idx, n_g in enumerate(gpus_rmvpe):
+                    cmd = (
+                        '"%s" infer/modules/train/extract/extract_f0_rmvpe.py %s %s %s "%s/logs/%s" %s '
+                        % (
+                            config.python_cmd,
+                            leng,
+                            idx,
+                            n_g,
+                            now_dir,
+                            exp_dir,
+                            config.is_half,
+                        )
+                    )
+                    logger.info(cmd)
+                    p = Popen(
+                        cmd, shell=True, cwd=now_dir
+                    )  # , shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, cwd=now_dir
+                    ps.append(p)
+                ###煞笔gr, popen read都非得全跑完了再一次性读取, 不用gr就正常读一句输出一句;只能额外弄出一个文本流定时读
+                done = [False]
+                threading.Thread(
+                    target=if_done_multi,  #
+                    args=(
+                        done,
+                        ps,
+                    ),
+                ).start()
+            else:
+                cmd = (
+                    config.python_cmd
+                    + ' infer/modules/train/extract/extract_f0_rmvpe_dml.py "%s/logs/%s" '
+                    % (
+                        now_dir,
+                        exp_dir,
+                    )
+                )
+                logger.info(cmd)
+                p = Popen(
+                    cmd, shell=True, cwd=now_dir
+                )  # , shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, cwd=now_dir
+                p.wait()
+                done = [True]
+        while 1:
+            with open(
+                "%s/logs/%s/extract_f0_feature.log" % (now_dir, exp_dir), "r"
+            ) as f:
+                yield (f.read())
+            sleep(1)
+            if done[0]:
+                break
+        with open("%s/logs/%s/extract_f0_feature.log" % (now_dir, exp_dir), "r") as f:
+            log = f.read()
+        logger.info(log)
+        yield log
+    ####对不同part分别开多进程
+    """
+    n_part=int(sys.argv[1])
+    i_part=int(sys.argv[2])
+    i_gpu=sys.argv[3]
+    exp_dir=sys.argv[4]
+    os.environ["CUDA_VISIBLE_DEVICES"]=str(i_gpu)
+    """
     leng = len(gpus)
     ps = []
-
     for idx, n_g in enumerate(gpus):
         cmd = (
-            f"{config.python_cmd} extract_feature_print.py {RQuote(config.device)} "
-            f"{RQuote(leng)} {RQuote(idx)} {RQuote(n_g)} {log_dir} {RQuote(version19)}"
+            '"%s" infer/modules/train/extract_feature_print.py %s %s %s %s "%s/logs/%s" %s'
+            % (
+                config.python_cmd,
+                config.device,
+                leng,
+                idx,
+                n_g,
+                now_dir,
+                exp_dir,
+                version19,
+            )
         )
-        print(cmd)
-        p = Popen(cmd, shell=True, cwd=now_dir)
+        logger.info(cmd)
+        p = Popen(
+            cmd, shell=True, cwd=now_dir
+        )  # , shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, cwd=now_dir
         ps.append(p)
-
+    ###煞笔gr, popen read都非得全跑完了再一次性读取, 不用gr就正常读一句输出一句;只能额外弄出一个文本流定时读
     done = [False]
-    threading.Thread(target=if_done_multi, args=(done, ps)).start()
-
-    while not done[0]:
-        with open(log_file, "r") as f:
-            yield f.read()
-        time.sleep(1)
-    
-    with open(log_file, "r") as f:
+    threading.Thread(
+        target=if_done_multi,
+        args=(
+            done,
+            ps,
+        ),
+    ).start()
+    while 1:
+        with open("%s/logs/%s/extract_f0_feature.log" % (now_dir, exp_dir), "r") as f:
+            yield (f.read())
+        sleep(1)
+        if done[0]:
+            break
+    with open("%s/logs/%s/extract_f0_feature.log" % (now_dir, exp_dir), "r") as f:
         log = f.read()
-
-    print(log)
+    logger.info(log)
     yield log
+
+def get_pretrained_models(path_str, f0_str, sr2):
+    if_pretrained_generator_exist = os.access(
+        "assets/pretrained%s/%sG%s.pth" % (path_str, f0_str, sr2), os.F_OK
+    )
+    if_pretrained_discriminator_exist = os.access(
+        "assets/pretrained%s/%sD%s.pth" % (path_str, f0_str, sr2), os.F_OK
+    )
+    if not if_pretrained_generator_exist:
+        logger.warn(
+            "assets/pretrained%s/%sG%s.pth not exist, will not use pretrained model",
+            path_str,
+            f0_str,
+            sr2,
+        )
+    if not if_pretrained_discriminator_exist:
+        logger.warn(
+            "assets/pretrained%s/%sD%s.pth not exist, will not use pretrained model",
+            path_str,
+            f0_str,
+            sr2,
+        )
+    return (
+        "assets/pretrained%s/%sG%s.pth" % (path_str, f0_str, sr2)
+        if if_pretrained_generator_exist
+        else "",
+        "assets/pretrained%s/%sD%s.pth" % (path_str, f0_str, sr2)
+        if if_pretrained_discriminator_exist
+        else "",
+    )
 
 def change_sr2(sr2, if_f0_3, version19):
     path_str = "" if version19 == "v1" else "_v2"
     f0_str = "f0" if if_f0_3 else ""
-    model_paths = {"G": "", "D": ""}
-
-    for model_type in model_paths:
-        file_path = f"pretrained{path_str}/{f0_str}{model_type}{sr2}.pth"
-        if os.access(file_path, os.F_OK):
-            model_paths[model_type] = file_path
-        else:
-            print(f"{file_path} doesn't exist, will not use pretrained model.")
-    
-    return (model_paths["G"], model_paths["D"])
+    return get_pretrained_models(path_str, f0_str, sr2)
 
 
 def change_version19(sr2, if_f0_3, version19):
     path_str = "" if version19 == "v1" else "_v2"
-    sr2 = "40k" if (sr2 == "32k" and version19 == "v1") else sr2
-    choices_update = {
-        "choices": ["40k", "48k"], "__type__": "update", "value": sr2
-        } if version19 == "v1" else {
-            "choices": ["40k", "48k", "32k"], "__type__": "update", "value": sr2}
-
+    if sr2 == "32k" and version19 == "v1":
+        sr2 = "40k"
+    to_return_sr2 = (
+        {"choices": ["40k", "48k"], "__type__": "update", "value": sr2}
+        if version19 == "v1"
+        else {"choices": ["40k", "48k", "32k"], "__type__": "update", "value": sr2}
+    )
     f0_str = "f0" if if_f0_3 else ""
-    model_paths = {"G": "", "D": ""}
-
-    for model_type in model_paths:
-        file_path = f"pretrained{path_str}/{f0_str}{model_type}{sr2}.pth"
-        if os.access(file_path, os.F_OK):
-            model_paths[model_type] = file_path
-        else:
-            print(f"{file_path} doesn't exist, will not use pretrained model.")
-
-    return (model_paths["G"], model_paths["D"], choices_update)
+    return (
+        *get_pretrained_models(path_str, f0_str, sr2),
+        to_return_sr2,
+    )
 
 
 def change_f0(if_f0_3, sr2, version19):  # f0method8,pretrained_G14,pretrained_D15
     path_str = "" if version19 == "v1" else "_v2"
-    
-    pth_format = "pretrained%s/f0%s%s.pth"
-    model_desc = { "G": "", "D": "" }
-    
-    for model_type in model_desc:
-        file_path = pth_format % (path_str, model_type, sr2)
-        if os.access(file_path, os.F_OK):
-            model_desc[model_type] = file_path
-        else:
-            print(file_path, "doesn't exist, will not use pretrained model")
-
     return (
         {"visible": if_f0_3, "__type__": "update"},
-        model_desc["G"],
-        model_desc["D"],
-        {"visible": if_f0_3, "__type__": "update"}
+        *get_pretrained_models(path_str, "f0", sr2),
     )
 
 
@@ -978,65 +911,135 @@ def click_train(
     if_save_every_weights18,
     version19,
 ):
-    with open('csvdb/stop.csv', 'w+') as file: file.write("False")
-    log_dir = os.path.join(now_dir, "logs", exp_dir1)
-    
-    os.makedirs(log_dir, exist_ok=True)
-
-    gt_wavs_dir = os.path.join(log_dir, "0_gt_wavs")
-    feature_dim = "256" if version19 == "v1" else "768"
-
-    feature_dir = os.path.join(log_dir, f"3_feature{feature_dim}")
-
-    log_interval = set_log_interval(log_dir, batch_size12)
-
-    required_dirs = [gt_wavs_dir, feature_dir]
-    
-    if if_f0_3:
-        f0_dir = f"{log_dir}/2a_f0"
-        f0nsf_dir = f"{log_dir}/2b-f0nsf"
-        required_dirs.extend([f0_dir, f0nsf_dir])
-
-    names = set(name.split(".")[0] for directory in required_dirs for name in os.listdir(directory))
-
-    def generate_paths(name):
-        paths = [gt_wavs_dir, feature_dir]
-        if if_f0_3:
-            paths.extend([f0_dir, f0nsf_dir])
-        return '|'.join([path.replace('\\', '\\\\') + '/' + name + ('.wav.npy' if path in [f0_dir, f0nsf_dir] else '.wav' if path == gt_wavs_dir else '.npy') for path in paths])
-
-    opt = [f"{generate_paths(name)}|{spk_id5}" for name in names]
-    mute_dir = f"{now_dir}/logs/mute"
-    
-    for _ in range(2):
-        mute_string = f"{mute_dir}/0_gt_wavs/mute{sr2}.wav|{mute_dir}/3_feature{feature_dim}/mute.npy"
-        if if_f0_3:
-            mute_string += f"|{mute_dir}/2a_f0/mute.wav.npy|{mute_dir}/2b-f0nsf/mute.wav.npy"
-        opt.append(mute_string+f"|{spk_id5}")
-
-    shuffle(opt)
-    with open(f"{log_dir}/filelist.txt", "w") as f:
-        f.write("\n".join(opt))
-
-    print("write filelist done")
-    print("use gpus:", gpus16)
-
-    if pretrained_G14 == "":
-        print("no pretrained Generator")
-    if pretrained_D15 == "":
-        print("no pretrained Discriminator")
-
-    G_train = f"-pg {pretrained_G14}" if pretrained_G14 else ""
-    D_train = f"-pd {pretrained_D15}" if pretrained_D15 else ""
-    
-    cmd = (
-        f"{config.python_cmd} train_nsf_sim_cache_sid_load_pretrain.py -e {exp_dir1} -sr {sr2} -f0 {int(if_f0_3)} -bs {batch_size12}"
-        f" -g {gpus16 if gpus16 is not None else ''} -te {total_epoch11} -se {save_epoch10} {G_train} {D_train} -l {int(if_save_latest13)}"
-        f" -c {int(if_cache_gpu17)} -sw {int(if_save_every_weights18)} -v {version19} -li {log_interval}"
+    # 生成filelist
+    exp_dir = "%s/logs/%s" % (now_dir, exp_dir1)
+    os.makedirs(exp_dir, exist_ok=True)
+    gt_wavs_dir = "%s/0_gt_wavs" % (exp_dir)
+    feature_dir = (
+        "%s/3_feature256" % (exp_dir)
+        if version19 == "v1"
+        else "%s/3_feature768" % (exp_dir)
     )
-
-    print(cmd)
-
+    if if_f0_3:
+        f0_dir = "%s/2a_f0" % (exp_dir)
+        f0nsf_dir = "%s/2b-f0nsf" % (exp_dir)
+        names = (
+            set([name.split(".")[0] for name in os.listdir(gt_wavs_dir)])
+            & set([name.split(".")[0] for name in os.listdir(feature_dir)])
+            & set([name.split(".")[0] for name in os.listdir(f0_dir)])
+            & set([name.split(".")[0] for name in os.listdir(f0nsf_dir)])
+        )
+    else:
+        names = set([name.split(".")[0] for name in os.listdir(gt_wavs_dir)]) & set(
+            [name.split(".")[0] for name in os.listdir(feature_dir)]
+        )
+    opt = []
+    for name in names:
+        if if_f0_3:
+            opt.append(
+                "%s/%s.wav|%s/%s.npy|%s/%s.wav.npy|%s/%s.wav.npy|%s"
+                % (
+                    gt_wavs_dir.replace("\\", "\\\\"),
+                    name,
+                    feature_dir.replace("\\", "\\\\"),
+                    name,
+                    f0_dir.replace("\\", "\\\\"),
+                    name,
+                    f0nsf_dir.replace("\\", "\\\\"),
+                    name,
+                    spk_id5,
+                )
+            )
+        else:
+            opt.append(
+                "%s/%s.wav|%s/%s.npy|%s"
+                % (
+                    gt_wavs_dir.replace("\\", "\\\\"),
+                    name,
+                    feature_dir.replace("\\", "\\\\"),
+                    name,
+                    spk_id5,
+                )
+            )
+    fea_dim = 256 if version19 == "v1" else 768
+    if if_f0_3:
+        for _ in range(2):
+            opt.append(
+                "%s/logs/mute/0_gt_wavs/mute%s.wav|%s/logs/mute/3_feature%s/mute.npy|%s/logs/mute/2a_f0/mute.wav.npy|%s/logs/mute/2b-f0nsf/mute.wav.npy|%s"
+                % (now_dir, sr2, now_dir, fea_dim, now_dir, now_dir, spk_id5)
+            )
+    else:
+        for _ in range(2):
+            opt.append(
+                "%s/logs/mute/0_gt_wavs/mute%s.wav|%s/logs/mute/3_feature%s/mute.npy|%s"
+                % (now_dir, sr2, now_dir, fea_dim, spk_id5)
+            )
+    shuffle(opt)
+    with open("%s/filelist.txt" % exp_dir, "w") as f:
+        f.write("\n".join(opt))
+    logger.debug("Write filelist done")
+    # 生成config#无需生成config
+    # cmd = python_cmd + " train_nsf_sim_cache_sid_load_pretrain.py -e mi-test -sr 40k -f0 1 -bs 4 -g 0 -te 10 -se 5 -pg pretrained/f0G40k.pth -pd pretrained/f0D40k.pth -l 1 -c 0"
+    logger.info("Use gpus: %s", str(gpus16))
+    if pretrained_G14 == "":
+        logger.info("No pretrained Generator")
+    if pretrained_D15 == "":
+        logger.info("No pretrained Discriminator")
+    if version19 == "v1" or sr2 == "40k":
+        config_path = "v1/%s.json" % sr2
+    else:
+        config_path = "v2/%s.json" % sr2
+    config_save_path = os.path.join(exp_dir, "config.json")
+    if not pathlib.Path(config_save_path).exists():
+        with open(config_save_path, "w", encoding="utf-8") as f:
+            json.dump(
+                config.json_config[config_path],
+                f,
+                ensure_ascii=False,
+                indent=4,
+                sort_keys=True,
+            )
+            f.write("\n")
+    if gpus16:
+        cmd = (
+            '"%s" infer/modules/train/train.py -e "%s" -sr %s -f0 %s -bs %s -g %s -te %s -se %s %s %s -l %s -c %s -sw %s -v %s'
+            % (
+                config.python_cmd,
+                exp_dir1,
+                sr2,
+                1 if if_f0_3 else 0,
+                batch_size12,
+                gpus16,
+                total_epoch11,
+                save_epoch10,
+                "-pg %s" % pretrained_G14 if pretrained_G14 != "" else "",
+                "-pd %s" % pretrained_D15 if pretrained_D15 != "" else "",
+                1 if if_save_latest13 == i18n("是") else 0,
+                1 if if_cache_gpu17 == i18n("是") else 0,
+                1 if if_save_every_weights18 == i18n("是") else 0,
+                version19,
+            )
+        )
+    else:
+        cmd = (
+            '"%s" infer/modules/train/train.py -e "%s" -sr %s -f0 %s -bs %s -te %s -se %s %s %s -l %s -c %s -sw %s -v %s'
+            % (
+                config.python_cmd,
+                exp_dir1,
+                sr2,
+                1 if if_f0_3 else 0,
+                batch_size12,
+                total_epoch11,
+                save_epoch10,
+                "-pg %s" % pretrained_G14 if pretrained_G14 != "" else "",
+                "-pd %s" % pretrained_D15 if pretrained_D15 != "" else "",
+                1 if if_save_latest13 == i18n("是") else 0,
+                1 if if_cache_gpu17 == i18n("是") else 0,
+                1 if if_save_every_weights18 == i18n("是") else 0,
+                version19,
+            )
+        )
+    logger.info(cmd)
     global p
     p = Popen(cmd, shell=True, cwd=now_dir)
     global PID
@@ -1046,80 +1049,112 @@ def click_train(
 
     return i18n("Training is done, check train.log"), {"visible": False, "__type__": "update"}, {"visible": True, "__type__": "update"}
 
+
 def train_index(exp_dir1, version19):
-    exp_dir = os.path.join(now_dir, 'logs', exp_dir1)
+    # exp_dir = "%s/logs/%s" % (now_dir, exp_dir1)
+    exp_dir = "logs/%s" % (exp_dir1)
     os.makedirs(exp_dir, exist_ok=True)
-
-    feature_dim = '256' if version19 == "v1" else '768'
-    feature_dir = os.path.join(exp_dir, f"3_feature{feature_dim}")
-
-    if not os.path.exists(feature_dir) or len(os.listdir(feature_dir)) == 0:
+    feature_dir = (
+        "%s/3_feature256" % (exp_dir)
+        if version19 == "v1"
+        else "%s/3_feature768" % (exp_dir)
+    )
+    if not os.path.exists(feature_dir):
         return "请先进行特征提取!"
-
-    npys = [np.load(os.path.join(feature_dir, name)) for name in sorted(os.listdir(feature_dir))]
-            
-    big_npy = np.concatenate(npys, 0)
-    np.random.shuffle(big_npy)
-
+    listdir_res = list(os.listdir(feature_dir))
+    if len(listdir_res) == 0:
+        return "请先进行特征提取！"
     infos = []
-    if big_npy.shape[0] > 2*10**5:
+    npys = []
+    for name in sorted(listdir_res):
+        phone = np.load("%s/%s" % (feature_dir, name))
+        npys.append(phone)
+    big_npy = np.concatenate(npys, 0)
+    big_npy_idx = np.arange(big_npy.shape[0])
+    np.random.shuffle(big_npy_idx)
+    big_npy = big_npy[big_npy_idx]
+    if big_npy.shape[0] > 2e5:
         infos.append("Trying doing kmeans %s shape to 10k centers." % big_npy.shape[0])
         yield "\n".join(infos)
         try:
-            big_npy = MiniBatchKMeans(n_clusters=10000, verbose=True, batch_size=256 * config.n_cpu, 
-                                      compute_labels=False,init="random").fit(big_npy).cluster_centers_
-        except Exception as e:
-            infos.append(str(e))
+            big_npy = (
+                MiniBatchKMeans(
+                    n_clusters=10000,
+                    verbose=True,
+                    batch_size=256 * config.n_cpu,
+                    compute_labels=False,
+                    init="random",
+                )
+                .fit(big_npy)
+                .cluster_centers_
+            )
+        except:
+            info = traceback.format_exc()
+            logger.info(info)
+            infos.append(info)
             yield "\n".join(infos)
 
-    np.save(os.path.join(exp_dir, "total_fea.npy"), big_npy)
-
+    np.save("%s/total_fea.npy" % exp_dir, big_npy)
     n_ivf = min(int(16 * np.sqrt(big_npy.shape[0])), big_npy.shape[0] // 39)
     infos.append("%s,%s" % (big_npy.shape, n_ivf))
     yield "\n".join(infos)
-
-    index = faiss.index_factory(int(feature_dim), f"IVF{n_ivf},Flat")
-
-    index_ivf = faiss.extract_index_ivf(index)
+    index = faiss.index_factory(256 if version19 == "v1" else 768, "IVF%s,Flat" % n_ivf)
+    # index = faiss.index_factory(256if version19=="v1"else 768, "IVF%s,PQ128x4fs,RFlat"%n_ivf)
+    infos.append("training")
+    yield "\n".join(infos)
+    index_ivf = faiss.extract_index_ivf(index)  #
     index_ivf.nprobe = 1
-
     index.train(big_npy)
-
-    index_file_base = f"{exp_dir}/trained_IVF{n_ivf}_Flat_nprobe_{index_ivf.nprobe}_{exp_dir1}_{version19}.index"
-    faiss.write_index(index, index_file_base)
+    faiss.write_index(
+        index,
+        "%s/trained_IVF%s_Flat_nprobe_%s_%s_%s.index"
+        % (exp_dir, n_ivf, index_ivf.nprobe, exp_dir1, version19),
+    )
 
     infos.append("adding")
     yield "\n".join(infos)
-
     batch_size_add = 8192
     for i in range(0, big_npy.shape[0], batch_size_add):
-        index.add(big_npy[i:i + batch_size_add])
-    
-    index_file_base = f"{exp_dir}/added_IVF{n_ivf}_Flat_nprobe_{index_ivf.nprobe}_{exp_dir1}_{version19}.index"
-    faiss.write_index(index, index_file_base)
-
-    infos.append(f"Successful Index Construction，added_IVF{n_ivf}_Flat_nprobe_{index_ivf.nprobe}_{exp_dir1}_{version19}.index")
+        index.add(big_npy[i : i + batch_size_add])
+    faiss.write_index(
+        index,
+        "%s/added_IVF%s_Flat_nprobe_%s_%s_%s.index"
+        % (exp_dir, n_ivf, index_ivf.nprobe, exp_dir1, version19),
+    )
+    infos.append(
+        "Successful Index Construction，added_IVF%s_Flat_nprobe_%s_%s_%s.index"
+        % (n_ivf, index_ivf.nprobe, exp_dir1, version19)
+    )
+    # faiss.write_index(index, '%s/added_IVF%s_Flat_FastScan_%s.index'%(exp_dir,n_ivf,version19))
+    # infos.append("成功构建索引，added_IVF%s_Flat_FastScan_%s.index"%(n_ivf,version19))
     yield "\n".join(infos)
 
 def change_info_(ckpt_path):
-    train_log_path = os.path.join(os.path.dirname(ckpt_path), "train.log")
-    
-    if not os.path.exists(train_log_path):
+    if not os.path.exists(ckpt_path.replace(os.path.basename(ckpt_path), "train.log")):
         return {"__type__": "update"}, {"__type__": "update"}, {"__type__": "update"}
-
     try:
-        with open(train_log_path, "r") as f:
-            info_line = next(f).strip()
-            info = eval(info_line.split("\t")[-1])
-            
-            sr, f0 = info.get("sample_rate"), info.get("if_f0")
-            version = "v2" if info.get("version") == "v2" else "v1"
-
+        with open(
+            ckpt_path.replace(os.path.basename(ckpt_path), "train.log"), "r"
+        ) as f:
+            info = eval(f.read().strip("\n").split("\n")[0].split("\t")[-1])
+            sr, f0 = info["sample_rate"], info["if_f0"]
+            version = "v2" if ("version" in info and info["version"] == "v2") else "v1"
             return sr, str(f0), version
-
-    except Exception as e:
-        print(f"Exception occurred: {str(e)}, Traceback: {traceback.format_exc()}")
+    except:
+        traceback.print_exc()
         return {"__type__": "update"}, {"__type__": "update"}, {"__type__": "update"}
+
+F0GPUVisible = config.dml == False
+
+
+def change_f0_method(f0method8):
+    if f0method8 == "rmvpe_gpu":
+        visible = F0GPUVisible
+    else:
+        visible = False
+    return {"visible": visible, "__type__": "update"}
+
+
 
 def export_onnx(model_path, exported_path):
     device = torch.device("cpu")
@@ -1189,11 +1224,11 @@ def cli_infer(com):
     output_path = f'audio-others/{output_file_name}'
     
     print(f"{output_message} Starting the inference...")
-    vc_data = get_vc(model_name, protection_amnt, protection_amnt)
+    vc_data = vc.get_vc(model_name, protection_amnt, protection_amnt)
     print(vc_data)
 
     print(f"{output_message} Performing inference...")
-    conversion_data = vc_single(
+    conversion_data = vc.vc_single(
         speaker_id,
         source_audio_path,
         source_audio_path,
@@ -1607,7 +1642,7 @@ def vc_single_tts(
         # file_big_npy = (
         #     file_big_npy.strip(" ").strip('"').strip("\n").strip('"').strip(" ")
         # )
-        audio_opt = vc.pipeline(
+        audio_opt = Pipeline(
             hubert_model,
             net_g,
             sid,
@@ -1668,7 +1703,7 @@ def custom_voice(
 
         #hubert_model = None
 
-        get_vc(
+        vc.get_vc(
             sid=model_voice_path,  # model path
             to_return_protect0=0.33,
             to_return_protect1=0.33
@@ -1798,7 +1833,7 @@ def make_test(
             return os.path.join(now_dir, "audio-outputs", "converted_tts.wav"), os.path.join(now_dir, "audio-outputs", "real_tts.wav")
         elif tts_method == "Bark-tts":
             try:
-                get_vc(
+                vc.get_vc(
                 sid=model_path,  # model path
                 to_return_protect0=0.33,
                 to_return_protect1=0.33
@@ -2131,7 +2166,7 @@ def GradioSetup(UTheme=gr.themes.Soft()):
                     with gr.Group(): # I think this defines the big convert button
                         with gr.Row():
                             but0.click(
-                                vc_single,
+                                vc.vc_single,
                                 [
                                     spk_item,
                                     input_audio0,
@@ -2274,7 +2309,7 @@ def GradioSetup(UTheme=gr.themes.Soft()):
                                 vc_output3 = gr.Textbox(label=i18n("Output information:")) 
                                 but1 = gr.Button(i18n("Convert"), variant="primary")
                                 but1.click(
-                                    vc_multi,
+                                    vc.vc_multi,
                                     [
                                         spk_item,
                                         dir_input,
@@ -2299,12 +2334,12 @@ def GradioSetup(UTheme=gr.themes.Soft()):
                                 )
 
                     sid0.change(
-                        fn=get_vc,
+                        fn=vc.get_vc,
                         inputs=[sid0, protect0, protect1],
-                        outputs=[spk_item, protect0, protect1],
+                        outputs=[spk_item, protect0, protect1, file_index2],
                     )
 
-                    spk_item, protect0, protect1 = get_vc(sid0.value, protect0, protect1) 
+                    spk_item, protect0, protect1, _, __ = vc.get_vc(sid0.value, protect0, protect1) 
 
                     # Function to toggle advanced settings
                     def toggle_advanced_settings_batch(checkbox):
@@ -2383,16 +2418,27 @@ def GradioSetup(UTheme=gr.themes.Soft()):
                                     value=gpus,
                                     interactive=True,
                                 )
+                                gpu_info9 = gr.Textbox(
+                                    label=i18n("显卡信息"), value=gpu_info, visible=F0GPUVisible
+                                )
                                 gr.Textbox(label=i18n("GPU Information:"), value=gpu_info)
                             with gr.Column():
                                 f0method8 = gr.Radio(
                                     label=i18n(
                                         "Select the pitch extraction algorithm:"
                                     ),
-                                    choices=["pm", "harvest", "dio", "crepe", "mangio-crepe", "rmvpe"],
+                                    choices=["pm", "harvest", "dio", "crepe", "mangio-crepe", "rmvpe", "rmvpe_gpu"],
                                     # [ MANGIO ]: Fork feature: Crepe on f0 extraction for training.
                                     value="rmvpe",
                                     interactive=True,
+                                )
+                                gpus_rmvpe = gr.Textbox(
+                                    label=i18n(
+                                        "rmvpe卡号配置：以-分隔输入使用的不同进程卡号,例如0-0-1使用在卡0上跑2个进程并在卡1上跑1个进程"
+                                        ),
+                                        value="%s-%s" % (gpus, gpus),
+                                        interactive=True,
+                                        visible=F0GPUVisible,
                                 )
                                 
                                 extraction_crepe_hop_length = gr.Slider(
@@ -2415,11 +2461,16 @@ def GradioSetup(UTheme=gr.themes.Soft()):
                                     inputs=[f0method8],
                                     outputs=[extraction_crepe_hop_length]
                                 )
+                                f0method8.change(
+                                    fn=change_f0_method,
+                                    inputs=[f0method8],
+                                    outputs=[gpus_rmvpe],
+                                    )
                             but2 = gr.Button(i18n("Feature extraction"), variant="primary")
                             info2 = gr.Textbox(label=i18n("Output information:"), value="", max_lines=8, interactive=False)
                             but2.click(
                                 extract_f0_feature,
-                                [gpus6, np7, f0method8, if_f0_3, exp_dir1, version19, extraction_crepe_hop_length],
+                                [gpus6, np7, f0method8, if_f0_3, exp_dir1, version19, extraction_crepe_hop_length, gpus_rmvpe,],
                                 [info2],
                             )
                 with gr.Group():

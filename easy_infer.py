@@ -26,7 +26,8 @@ from unidecode import unidecode
 import re
 import time
 from lib.infer_pack.models_onnx import SynthesizerTrnMsNSFsidM
-from vc_infer_pipeline import VC
+from infer.modules.vc.pipeline import Pipeline
+VC = Pipeline
 from lib.infer_pack.models import (
     SynthesizerTrnMs256NSFsid,
     SynthesizerTrnMs256NSFsid_nono,
