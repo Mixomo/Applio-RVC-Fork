@@ -1014,9 +1014,9 @@ def click_train(
                 save_epoch10,
                 "-pg %s" % pretrained_G14 if pretrained_G14 != "" else "",
                 "-pd %s" % pretrained_D15 if pretrained_D15 != "" else "",
-                1 if if_save_latest13 == i18n("是") else 0,
-                1 if if_cache_gpu17 == i18n("是") else 0,
-                1 if if_save_every_weights18 == i18n("是") else 0,
+                1 if if_save_latest13 == True else 0,
+                1 if if_cache_gpu17 == True else 0,
+                1 if if_save_every_weights18 == True else 0,
                 version19,
             )
         )
@@ -1033,9 +1033,9 @@ def click_train(
                 save_epoch10,
                 "-pg %s" % pretrained_G14 if pretrained_G14 != "" else "",
                 "-pd %s" % pretrained_D15 if pretrained_D15 != "" else "",
-                1 if if_save_latest13 == i18n("是") else 0,
-                1 if if_cache_gpu17 == i18n("是") else 0,
-                1 if if_save_every_weights18 == i18n("是") else 0,
+                1 if if_save_latest13 == True else 0,
+                1 if if_cache_gpu17 == True else 0,
+                1 if if_save_every_weights18 == True else 0,
                 version19,
             )
         )
