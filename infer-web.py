@@ -2648,7 +2648,7 @@ def GradioSetup():
                             )
                             batch_size12 = gr.Slider(
                                 minimum=1,
-                                maximum=50,
+                                maximum=128,
                                 step=1,
                                 label=i18n("Batch size per GPU:"),
                                 value=default_batch_size,
